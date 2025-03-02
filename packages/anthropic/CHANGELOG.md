@@ -1,5 +1,55 @@
 # @ai-sdk/anthropic
 
+## 1.1.13
+
+### Patch Changes
+
+- 3004b14: feat(provider/anthropic): add bash_20250124 and text_editor_20250124 tools
+
+## 1.1.12
+
+### Patch Changes
+
+- b3e5a15: fix (provider/anthropic): add model setting to allow omitting reasoning content from model requests
+
+## 1.1.11
+
+### Patch Changes
+
+- 00276ae: feat (provider/anthropic): update types for Anthropic computer_20250124 tool
+- a4f8714: feat (provider/anthropic): update beta flag for sonnet-3-7 when using new computer-use tool
+
+## 1.1.10
+
+### Patch Changes
+
+- ddf9740: feat (ai): add anthropic reasoning
+- Updated dependencies [ddf9740]
+  - @ai-sdk/provider@1.0.9
+  - @ai-sdk/provider-utils@2.1.10
+
+## 1.1.9
+
+### Patch Changes
+
+- Updated dependencies [2761f06]
+  - @ai-sdk/provider@1.0.8
+  - @ai-sdk/provider-utils@2.1.9
+
+## 1.1.8
+
+### Patch Changes
+
+- Updated dependencies [2e898b4]
+  - @ai-sdk/provider-utils@2.1.8
+
+## 1.1.7
+
+### Patch Changes
+
+- Updated dependencies [3ff4ef8]
+  - @ai-sdk/provider-utils@2.1.7
+
 ## 1.1.6
 
 ### Patch Changes

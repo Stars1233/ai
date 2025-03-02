@@ -5,6 +5,7 @@ import { processChatResponse } from './process-chat-response';
 import { createDataProtocolStream } from './test/create-data-protocol-stream';
 import { JSONValue, Message } from './types';
 import { LanguageModelUsage } from './duplicated/usage';
+import { format } from 'path';
 
 let updateCalls: Array<{
   message: Message;
@@ -263,6 +264,9 @@ describe('scenario: server-side tool roundtrip with multiple assistant reasoning
         'reasoning',
         'use a tool to get the weather in London.',
       ),
+      formatDataStreamPart('reasoning_signature', {
+        signature: '1234567890',
+      }),
       formatDataStreamPart('tool_call', {
         toolCallId: 'tool-call-id',
         toolName: 'tool-name',
@@ -278,6 +282,9 @@ describe('scenario: server-side tool roundtrip with multiple assistant reasoning
         isContinued: false,
       }),
       formatDataStreamPart('reasoning', 'I know know the weather in London.'),
+      formatDataStreamPart('reasoning_signature', {
+        signature: 'abc123',
+      }),
       formatDataStreamPart('text', 'The weather in London is sunny.'),
       formatDataStreamPart('finish_step', {
         finishReason: 'stop',
@@ -564,13 +571,21 @@ describe('scenario: server provides reasoning', () => {
       formatDataStreamPart('start_step', { messageId: 'step_123' }),
       formatDataStreamPart('reasoning', 'I will open the conversation'),
       formatDataStreamPart('reasoning', ' with witty banter. '),
+      formatDataStreamPart('reasoning_signature', {
+        signature: '1234567890',
+      }),
+      formatDataStreamPart('redacted_reasoning', {
+        data: 'redacted-data',
+      }),
       formatDataStreamPart('reasoning', 'Once the user has relaxed,'),
       formatDataStreamPart(
         'reasoning',
         ' I will pry for valuable information.',
       ),
-      formatDataStreamPart('text', 'Hello, '),
-      formatDataStreamPart('text', 'world!'),
+      formatDataStreamPart('reasoning_signature', {
+        signature: 'abc123',
+      }),
+      formatDataStreamPart('text', 'Hi there!'),
       formatDataStreamPart('finish_step', {
         finishReason: 'stop',
         usage: { completionTokens: 5, promptTokens: 10 },
@@ -632,6 +647,46 @@ describe('scenario: onToolCall is executed', () => {
   });
 
   it('should call the update function twice with the correct arguments', async () => {
+    expect(updateCalls).toMatchSnapshot();
+  });
+
+  it('should call the onFinish function with the correct arguments', async () => {
+    expect(finishCalls).toMatchSnapshot();
+  });
+});
+
+describe('scenario: server provides sources', () => {
+  beforeEach(async () => {
+    const stream = createDataProtocolStream([
+      formatDataStreamPart('text', 'The weather in London is sunny.'),
+      formatDataStreamPart('source', {
+        sourceType: 'url',
+        id: 'source-id',
+        url: 'https://example.com',
+        title: 'Example',
+      }),
+      formatDataStreamPart('finish_step', {
+        finishReason: 'stop',
+        usage: { completionTokens: 2, promptTokens: 4 },
+        isContinued: false,
+      }),
+      formatDataStreamPart('finish_message', {
+        finishReason: 'stop',
+        usage: { completionTokens: 7, promptTokens: 14 },
+      }),
+    ]);
+
+    await processChatResponse({
+      stream,
+      update,
+      onFinish,
+      generateId: mockId(),
+      getCurrentDate: vi.fn().mockReturnValue(new Date('2023-01-01')),
+      lastMessage: undefined,
+    });
+  });
+
+  it('should call the update function with the correct arguments', async () => {
     expect(updateCalls).toMatchSnapshot();
   });
 

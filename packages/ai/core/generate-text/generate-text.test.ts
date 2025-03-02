@@ -1,10 +1,10 @@
 import { LanguageModelV1CallOptions } from '@ai-sdk/provider';
+import { mockId } from '@ai-sdk/provider-utils/test';
 import { jsonSchema } from '@ai-sdk/ui-utils';
 import assert from 'node:assert';
 import { z } from 'zod';
 import { Output } from '.';
 import { ToolExecutionError } from '../../errors';
-import { mockId } from '../test/mock-id';
 import { MockLanguageModelV1 } from '../test/mock-language-model-v1';
 import { MockTracer } from '../test/mock-tracer';
 import { tool } from '../tool/tool';
@@ -37,6 +37,24 @@ const modelWithSources = new MockLanguageModelV1({
         providerMetadata: { provider: { custom: 'value2' } },
       },
     ],
+  }),
+});
+
+const modelWithReasoning = new MockLanguageModelV1({
+  doGenerate: async () => ({
+    ...dummyResponseValues,
+    reasoning: [
+      {
+        type: 'text',
+        text: 'I will open the conversation with witty banter.',
+        signature: 'signature',
+      },
+      {
+        type: 'redacted',
+        data: 'redacted-reasoning-data',
+      },
+    ],
+    text: 'Hello, world!',
   }),
 });
 
@@ -73,15 +91,9 @@ describe('result.text', () => {
 });
 
 describe('result.reasoning', () => {
-  it('should contain reasoning from model response', async () => {
+  it('should contain reasoning string from model response', async () => {
     const result = await generateText({
-      model: new MockLanguageModelV1({
-        doGenerate: async () => ({
-          ...dummyResponseValues,
-          text: 'Hello, world!',
-          reasoning: 'I will open the conversation with witty banter.',
-        }),
-      }),
+      model: modelWithReasoning,
       prompt: 'prompt',
     });
 
@@ -105,13 +117,7 @@ describe('result.sources', () => {
 describe('result.steps', () => {
   it('should add the reasoning from the model response to the step result', async () => {
     const result = await generateText({
-      model: new MockLanguageModelV1({
-        doGenerate: async () => ({
-          ...dummyResponseValues,
-          text: 'Hello, world!',
-          reasoning: 'I will open the conversation with witty banter.',
-        }),
-      }),
+      model: modelWithReasoning,
       prompt: 'prompt',
       experimental_generateMessageId: mockId({
         prefix: 'msg',
@@ -378,6 +384,16 @@ describe('result.response.messages', () => {
           },
         },
       },
+      prompt: 'test-input',
+      experimental_generateMessageId: mockId({ prefix: 'msg' }),
+    });
+
+    expect(result.response.messages).toMatchSnapshot();
+  });
+
+  it('should contain reasoning', async () => {
+    const result = await generateText({
+      model: modelWithReasoning,
       prompt: 'test-input',
       experimental_generateMessageId: mockId({ prefix: 'msg' }),
     });

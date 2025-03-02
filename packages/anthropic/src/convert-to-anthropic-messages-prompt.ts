@@ -1,4 +1,5 @@
 import {
+  LanguageModelV1CallWarning,
   LanguageModelV1Message,
   LanguageModelV1Prompt,
   LanguageModelV1ProviderMetadata,
@@ -14,8 +15,12 @@ import {
 
 export function convertToAnthropicMessagesPrompt({
   prompt,
+  sendReasoning,
+  warnings,
 }: {
   prompt: LanguageModelV1Prompt;
+  sendReasoning: boolean;
+  warnings: LanguageModelV1CallWarning[];
 }): {
   prompt: AnthropicMessagesPrompt;
   betas: Set<string>;
@@ -250,6 +255,33 @@ export function convertToAnthropicMessagesPrompt({
                 break;
               }
 
+              case 'reasoning': {
+                if (sendReasoning) {
+                  anthropicContent.push({
+                    type: 'thinking',
+                    thinking: part.text,
+                    signature: part.signature!,
+                    cache_control: cacheControl,
+                  });
+                } else {
+                  warnings.push({
+                    type: 'other',
+                    message:
+                      'sending reasoning content is disabled for this model',
+                  });
+                }
+                break;
+              }
+
+              case 'redacted-reasoning': {
+                anthropicContent.push({
+                  type: 'redacted_thinking',
+                  data: part.data,
+                  cache_control: cacheControl,
+                });
+                break;
+              }
+
               case 'tool-call': {
                 anthropicContent.push({
                   type: 'tool_use',
@@ -259,6 +291,11 @@ export function convertToAnthropicMessagesPrompt({
                   cache_control: cacheControl,
                 });
                 break;
+              }
+
+              default: {
+                const _exhaustiveCheck: never = part;
+                throw new Error(`Unsupported part: ${_exhaustiveCheck}`);
               }
             }
           }
