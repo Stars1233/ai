@@ -2,6 +2,7 @@ import {
   CreateMessage,
   Message,
   ReasoningUIPart,
+  SourceUIPart,
   TextUIPart,
   ToolInvocationUIPart,
   UIMessage,
@@ -9,7 +10,7 @@ import {
 
 export function getMessageParts(
   message: Message | CreateMessage | UIMessage,
-): (TextUIPart | ReasoningUIPart | ToolInvocationUIPart)[] {
+): (TextUIPart | ReasoningUIPart | ToolInvocationUIPart | SourceUIPart)[] {
   return (
     message.parts ?? [
       ...(message.toolInvocations
@@ -19,7 +20,13 @@ export function getMessageParts(
           }))
         : []),
       ...(message.reasoning
-        ? [{ type: 'reasoning' as const, reasoning: message.reasoning }]
+        ? [
+            {
+              type: 'reasoning' as const,
+              reasoning: message.reasoning,
+              details: [{ type: 'text' as const, text: message.reasoning }],
+            },
+          ]
         : []),
       ...(message.content
         ? [{ type: 'text' as const, text: message.content }]

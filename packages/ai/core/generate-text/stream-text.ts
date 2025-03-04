@@ -1,3 +1,4 @@
+import { AISDKError, LanguageModelV1Source } from '@ai-sdk/provider';
 import { createIdGenerator, IDGenerator } from '@ai-sdk/provider-utils';
 import { DataStreamString, formatDataStreamPart } from '@ai-sdk/ui-utils';
 import { Span } from '@opentelemetry/api';
@@ -43,18 +44,23 @@ import { prepareResponseHeaders } from '../util/prepare-response-headers';
 import { splitOnLastWhitespace } from '../util/split-on-last-whitespace';
 import { writeToServerResponse } from '../util/write-to-server-response';
 import { Output } from './output';
+import { asReasoningText, ReasoningDetail } from './reasoning-detail';
 import {
   runToolsTransformation,
   SingleRequestTextStreamPart,
 } from './run-tools-transformation';
 import { ResponseMessage, StepResult } from './step-result';
-import { StreamTextResult, TextStreamPart } from './stream-text-result';
+import {
+  DataStreamOptions,
+  StreamTextResult,
+  TextStreamPart,
+} from './stream-text-result';
 import { toResponseMessages } from './to-response-messages';
 import { ToolCallUnion } from './tool-call';
 import { ToolCallRepairFunction } from './tool-call-repair';
 import { ToolResultUnion } from './tool-result';
 import { ToolSet } from './tool-set';
-import { LanguageModelV1Source } from '@ai-sdk/provider';
+import { InvalidStreamPartError } from '../../errors/invalid-stream-part-error';
 
 const originalGenerateId = createIdGenerator({
   prefix: 'aitxt',
@@ -479,6 +485,9 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
   private readonly reasoningPromise = new DelayedPromise<
     Awaited<StreamTextResult<TOOLS, PARTIAL_OUTPUT>['reasoning']>
   >();
+  private readonly reasoningDetailsPromise = new DelayedPromise<
+    Awaited<StreamTextResult<TOOLS, PARTIAL_OUTPUT>['reasoningDetails']>
+  >();
   private readonly sourcesPromise = new DelayedPromise<
     Awaited<StreamTextResult<TOOLS, PARTIAL_OUTPUT>['sources']>
   >();
@@ -583,7 +592,11 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
     let recordedStepText = '';
     let recordedContinuationText = '';
     let recordedFullText = '';
-    let recordedReasoningText: string | undefined = undefined;
+
+    const stepReasoning: Array<ReasoningDetail> = [];
+    let activeReasoningText: undefined | (ReasoningDetail & { type: 'text' }) =
+      undefined;
+
     let recordedStepSources: LanguageModelV1Source[] = [];
     const recordedSources: LanguageModelV1Source[] = [];
 
@@ -635,8 +648,28 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
         }
 
         if (part.type === 'reasoning') {
-          recordedReasoningText =
-            (recordedReasoningText ?? '') + part.textDelta;
+          if (activeReasoningText == null) {
+            activeReasoningText = { type: 'text', text: part.textDelta };
+            stepReasoning.push(activeReasoningText);
+          } else {
+            activeReasoningText.text += part.textDelta;
+          }
+        }
+
+        if (part.type === 'reasoning-signature') {
+          if (activeReasoningText == null) {
+            throw new AISDKError({
+              name: 'InvalidStreamPart',
+              message: 'reasoning-signature without reasoning',
+            });
+          }
+
+          activeReasoningText.signature = part.signature;
+          activeReasoningText = undefined; // signature concludes reasoning part
+        }
+
+        if (part.type === 'redacted-reasoning') {
+          stepReasoning.push({ type: 'redacted', data: part.data });
         }
 
         if (part.type === 'source') {
@@ -655,6 +688,7 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
         if (part.type === 'step-finish') {
           const stepMessages = toResponseMessages({
             text: recordedContinuationText,
+            reasoning: stepReasoning,
             tools: tools ?? ({} as TOOLS),
             toolCalls: recordedToolCalls,
             toolResults: recordedToolResults,
@@ -687,7 +721,8 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
           const currentStepResult: StepResult<TOOLS> = {
             stepType,
             text: recordedStepText,
-            reasoning: recordedReasoningText,
+            reasoning: asReasoningText(stepReasoning),
+            reasoningDetails: stepReasoning,
             sources: recordedStepSources,
             toolCalls: recordedToolCalls,
             toolResults: recordedToolResults,
@@ -751,6 +786,8 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
           self.providerMetadataPromise.resolve(
             lastStep.experimental_providerMetadata,
           );
+          self.reasoningPromise.resolve(lastStep.reasoning);
+          self.reasoningDetailsPromise.resolve(lastStep.reasoningDetails);
 
           // derived:
           const finishReason = recordedFinishReason ?? 'unknown';
@@ -766,7 +803,6 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
 
           // aggregate results:
           self.textPromise.resolve(recordedFullText);
-          self.reasoningPromise.resolve(recordedReasoningText);
           self.sourcesPromise.resolve(recordedSources);
           self.stepsPromise.resolve(recordedSteps);
 
@@ -777,6 +813,7 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
             usage,
             text: recordedFullText,
             reasoning: lastStep.reasoning,
+            reasoningDetails: lastStep.reasoningDetails,
             sources: lastStep.sources,
             toolCalls: lastStep.toolCalls,
             toolResults: lastStep.toolResults,
@@ -1002,6 +1039,12 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
           const stepRequest = request ?? {};
           const stepToolCalls: ToolCallUnion<TOOLS>[] = [];
           const stepToolResults: ToolResultUnion<TOOLS>[] = [];
+
+          const stepReasoning: Array<ReasoningDetail> = [];
+          let activeReasoningText:
+            | undefined
+            | (ReasoningDetail & { type: 'text' }) = undefined;
+
           let stepFinishReason: FinishReason = 'unknown';
           let stepUsage: LanguageModelUsage = {
             promptTokens: 0,
@@ -1011,7 +1054,6 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
           let stepProviderMetadata: ProviderMetadata | undefined;
           let stepFirstChunk = true;
           let stepText = '';
-          let stepReasoning = '';
           let fullStepText = stepType === 'continue' ? previousStepText : '';
           let stepLogProbs: LogProbs | undefined;
           let stepResponse: { id: string; timestamp: Date; modelId: string } = {
@@ -1119,12 +1161,42 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
 
                     case 'reasoning': {
                       controller.enqueue(chunk);
-                      stepReasoning += chunk.textDelta;
+
+                      if (activeReasoningText == null) {
+                        activeReasoningText = {
+                          type: 'text',
+                          text: chunk.textDelta,
+                        };
+                        stepReasoning.push(activeReasoningText);
+                      } else {
+                        activeReasoningText.text += chunk.textDelta;
+                      }
+
                       break;
                     }
 
-                    case 'source': {
+                    case 'reasoning-signature': {
                       controller.enqueue(chunk);
+
+                      if (activeReasoningText == null) {
+                        throw new InvalidStreamPartError({
+                          chunk,
+                          message: 'reasoning-signature without reasoning',
+                        });
+                      }
+
+                      activeReasoningText.signature = chunk.signature;
+                      activeReasoningText = undefined; // signature concludes reasoning part
+                      break;
+                    }
+
+                    case 'redacted-reasoning': {
+                      controller.enqueue(chunk);
+                      stepReasoning.push({
+                        type: 'redacted',
+                        data: chunk.data,
+                      });
+
                       break;
                     }
 
@@ -1173,6 +1245,8 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
                       break;
                     }
 
+                    // forward:
+                    case 'source':
                     case 'tool-call-streaming-start':
                     case 'tool-call-delta': {
                       controller.enqueue(chunk);
@@ -1331,6 +1405,7 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
                       responseMessages.push(
                         ...toResponseMessages({
                           text: stepText,
+                          reasoning: stepReasoning,
                           tools: tools ?? ({} as TOOLS),
                           toolCalls: stepToolCalls,
                           toolResults: stepToolResults,
@@ -1415,6 +1490,10 @@ class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
 
   get reasoning() {
     return this.reasoningPromise.value;
+  }
+
+  get reasoningDetails() {
+    return this.reasoningDetailsPromise.value;
   }
 
   get sources() {
@@ -1516,10 +1595,14 @@ However, the LLM results are expected to be small enough to not cause issues.
     getErrorMessage = () => 'An error occurred.', // mask error messages for safety by default
     sendUsage = true,
     sendReasoning = false,
+    sendSources = false,
+    experimental_sendFinish = true,
   }: {
     getErrorMessage: ((error: unknown) => string) | undefined;
     sendUsage: boolean | undefined;
     sendReasoning: boolean | undefined;
+    sendSources: boolean | undefined;
+    experimental_sendFinish: boolean | undefined;
   }): ReadableStream<DataStreamString> {
     return this.fullStream.pipeThrough(
       new TransformStream<TextStreamPart<TOOLS>, DataStreamString>({
@@ -1540,8 +1623,34 @@ However, the LLM results are expected to be small enough to not cause issues.
               break;
             }
 
+            case 'redacted-reasoning': {
+              if (sendReasoning) {
+                controller.enqueue(
+                  formatDataStreamPart('redacted_reasoning', {
+                    data: chunk.data,
+                  }),
+                );
+              }
+              break;
+            }
+
+            case 'reasoning-signature': {
+              if (sendReasoning) {
+                controller.enqueue(
+                  formatDataStreamPart('reasoning_signature', {
+                    signature: chunk.signature,
+                  }),
+                );
+              }
+              break;
+            }
+
             case 'source': {
-              // not implemented yet
+              if (sendSources) {
+                controller.enqueue(
+                  formatDataStreamPart('source', chunk.source),
+                );
+              }
               break;
             }
 
@@ -1619,17 +1728,19 @@ However, the LLM results are expected to be small enough to not cause issues.
             }
 
             case 'finish': {
-              controller.enqueue(
-                formatDataStreamPart('finish_message', {
-                  finishReason: chunk.finishReason,
-                  usage: sendUsage
-                    ? {
-                        promptTokens: chunk.usage.promptTokens,
-                        completionTokens: chunk.usage.completionTokens,
-                      }
-                    : undefined,
-                }),
-              );
+              if (experimental_sendFinish) {
+                controller.enqueue(
+                  formatDataStreamPart('finish_message', {
+                    finishReason: chunk.finishReason,
+                    usage: sendUsage
+                      ? {
+                          promptTokens: chunk.usage.promptTokens,
+                          completionTokens: chunk.usage.completionTokens,
+                        }
+                      : undefined,
+                  }),
+                );
+              }
               break;
             }
 
@@ -1653,12 +1764,13 @@ However, the LLM results are expected to be small enough to not cause issues.
       getErrorMessage,
       sendUsage,
       sendReasoning,
-    }: ResponseInit & {
-      data?: StreamData;
-      getErrorMessage?: (error: unknown) => string;
-      sendUsage?: boolean; // default to true (TODO change to false in v5: secure by default)
-      sendReasoning?: boolean; // default to false
-    } = {},
+      sendSources,
+      experimental_sendFinish,
+    }: ResponseInit &
+      DataStreamOptions & {
+        data?: StreamData;
+        getErrorMessage?: (error: unknown) => string;
+      } = {},
   ) {
     writeToServerResponse({
       response,
@@ -1673,6 +1785,8 @@ However, the LLM results are expected to be small enough to not cause issues.
         getErrorMessage,
         sendUsage,
         sendReasoning,
+        sendSources,
+        experimental_sendFinish,
       }),
     });
   }
@@ -1690,33 +1804,31 @@ However, the LLM results are expected to be small enough to not cause issues.
   }
 
   // TODO breaking change 5.0: remove pipeThrough(new TextEncoderStream())
-  toDataStream(options?: {
-    data?: StreamData;
-    getErrorMessage?: (error: unknown) => string;
-    sendUsage?: boolean;
-    sendReasoning?: boolean;
-  }) {
+  toDataStream(
+    options?: DataStreamOptions & {
+      data?: StreamData;
+      getErrorMessage?: (error: unknown) => string;
+    },
+  ) {
     const stream = this.toDataStreamInternal({
       getErrorMessage: options?.getErrorMessage,
       sendUsage: options?.sendUsage,
       sendReasoning: options?.sendReasoning,
+      sendSources: options?.sendSources,
+      experimental_sendFinish: options?.experimental_sendFinish,
     }).pipeThrough(new TextEncoderStream());
 
     return options?.data ? mergeStreams(options?.data.stream, stream) : stream;
   }
 
-  mergeIntoDataStream(
-    writer: DataStreamWriter,
-    options?: {
-      sendUsage?: boolean;
-      sendReasoning?: boolean;
-    },
-  ) {
+  mergeIntoDataStream(writer: DataStreamWriter, options?: DataStreamOptions) {
     writer.merge(
       this.toDataStreamInternal({
         getErrorMessage: writer.onError,
         sendUsage: options?.sendUsage,
         sendReasoning: options?.sendReasoning,
+        sendSources: options?.sendSources,
+        experimental_sendFinish: options?.experimental_sendFinish,
       }),
     );
   }
@@ -1729,14 +1841,22 @@ However, the LLM results are expected to be small enough to not cause issues.
     getErrorMessage,
     sendUsage,
     sendReasoning,
-  }: ResponseInit & {
-    data?: StreamData;
-    getErrorMessage?: (error: unknown) => string;
-    sendUsage?: boolean;
-    sendReasoning?: boolean;
-  } = {}): Response {
+    sendSources,
+    experimental_sendFinish,
+  }: ResponseInit &
+    DataStreamOptions & {
+      data?: StreamData;
+      getErrorMessage?: (error: unknown) => string;
+    } = {}): Response {
     return new Response(
-      this.toDataStream({ data, getErrorMessage, sendUsage, sendReasoning }),
+      this.toDataStream({
+        data,
+        getErrorMessage,
+        sendUsage,
+        sendReasoning,
+        sendSources,
+        experimental_sendFinish,
+      }),
       {
         status,
         statusText,
